@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Succotash Alfabetizado - Prototipo Go Battle</title>
+  <style>
+    /* Estilos básicos para centrar el canvas */
+    html,body{height:100%;margin:0;font-family:Inter, system-ui, Arial;background:linear-gradient(180deg,#a8e6a1,#f7f0a8);}
+    .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px}
+    canvas{background:#177a3a;box-shadow:0 8px 30px rgba(0,0,0,0.25);border-radius:12px}
+    .ui{display:flex;gap:8px;align-items:center}
+    button{padding:8px 12px;border-radius:8px;border:none;background:#ffd166;color:#5b2a00;font-weight:600;cursor:pointer}
+    button:active{transform:translateY(1px)}
+    .legend{background:rgba(255,255,255,0.85);padding:8px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 style="margin:0;color:#3b2d00;">Succotash Alfabetizado — Prototipo Go Battle</h1>
+    <div class="ui">
+      <button id="startBtn">Iniciar Partida</button>
+      <div class="legend">WASD / Flechas: moverse • Espacio: disparar • P: pausar</div>
+    </div>
+    <canvas id="game" width="900" height="560"></canvas>
+  </div>
+
+<script>
+/*
+  Prototipo: Arena 2D con jugador, bots enemigos, disparos (letras), power-ups.
+  - Juego local: bots sencillos con IA básica.
+  - Código comentado en español para que puedas ampliar.
+*/
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+
+// --- Utilidades ---
+function rand(min,max){ return Math.random()*(max-min)+min }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)) }
+
+// --- Estado del juego ---
+let running=false, paused=false;
+let keys = {};
+
+// Jugador
+const player = {
+  x: W/2, y: H/2,
+  r: 18,
+  speed: 220, // px/s
+  color: '#ffd166',
+  lastShot: 0,
+  shootCooldown: 250, // ms
+  score: 0,
+  lives: 3
+};
+
+// Entidades
+let bullets = []; // proyectiles
+let enemies = [];
+let powerups = [];
+let particles = [];
+
+// Tiempo
+let lastTime = 0;
+
+// --- Entrada ---
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if(e.key === 'p') paused = !paused; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// --- Funciones de juego ---
+function spawnEnemy(){
+  // Spawn en borde aleatorio
+  const margin = 30;
+  const side = Math.floor(rand(0,4));
+  let x = rand(margin, W-margin), y = rand(margin, H-margin);
+  if(side===0) { x = -30; y = rand(0,H); }
+  if(side===1) { x = W+30; y = rand(0,H); }
+  if(side===2) { x = rand(0,W); y = -30; }
+  if(side===3) { x = rand(0,W); y = H+30; }
+
+  enemies.push({
+    x, y,
+    r: 16 + Math.floor(rand(0,8)),
+    speed: rand(60,120),
+    color: '#6ab04c',
+    dir: rand(0,Math.PI*2),
+    type: 'bot',
+    hp: 1 + Math.floor(rand(0,2))
+  });
+}
+
+function spawnPowerup(){
+  powerups.push({ x: rand(60,W-60), y: rand(60,H-60), r:12, kind: Math.random()<0.6? 'letter' : 'shield', life: 12000 });
+}
+
+function shoot(x,y,angle,owner='player'){ bullets.push({ x,y,dx:Math.cos(angle)*420, dy:Math.sin(angle)*420, r:8, owner, char: randomLetter() }); }
+
+function randomLetter(){
+  const letters = 'AEIOULNSTRM'; // vocales/consonantes comunes para prototipo
+  return letters[Math.floor(rand(0,letters.length))];
+}
+
+// --- Colisiones simples ---
+function dist(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+
+// --- Partículas ---
+function createParticles(x,y,color,count=10){
+  for(let i=0;i<count;i++) particles.push({ x,y, vx:rand(-180,180), vy:rand(-160,60), life:rand(400,900), t:0, color });
+}
+
+// --- Loop ---
+function update(dt){
+  if(!running || paused) return;
+
+  // Movimiento jugador
+  let vx=0, vy=0;
+  if(keys['w']||keys['arrowup']) vy -= 1;
+  if(keys['s']||keys['arrowdown']) vy += 1;
+  if(keys['a']||keys['arrowleft']) vx -= 1;
+  if(keys['d']||keys['arrowright']) vx += 1;
+  const mag = Math.hypot(vx,vy) || 1;
+  player.x += (vx/mag) * player.speed * dt;
+  player.y += (vy/mag) * player.speed * dt;
+  player.x = clamp(player.x, player.r, W-player.r);
+  player.y = clamp(player.y, player.r, H-player.r);
+
+  // Disparo (espacio)
+  if((keys[' '] || keys['space']) && Date.now() - player.lastShot > player.shootCooldown){
+    player.lastShot = Date.now();
+    // disparo a dirección del cursor (si hay) o hacia arriba por defecto
+    const angle = aimAngle || -Math.PI/2;
+    shoot(player.x + Math.cos(angle)*22, player.y + Math.sin(angle)*22, angle, 'player');
+  }
+
+  // Actualizar bullets
+  bullets.forEach(b=>{
+    b.x += b.dx * dt;
+    b.y += b.dy * dt;
+  });
+  bullets = bullets.filter(b=> b.x>-50 && b.x<W+50 && b.y>-50 && b.y<H+50);
+
+  // Enemigos: simple IA que intenta acercarse al jugador, con disparo ocasional
+  enemies.forEach(e=>{
+    const ax = player.x - e.x; const ay = player.y - e.y;
+    const a = Math.atan2(ay,ax);
+    e.x += Math.cos(a) * e.speed * dt;
+    e.y += Math.sin(a) * e.speed * dt;
+    // ocasional disparo: convierte en bala "enemy"
+    if(Math.random() < 0.002) shoot(e.x, e.y, a, 'enemy');
+  });
+
+  // Colisiones: bullets vs entities
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    if(b.owner === 'player'){
+      for(let j=enemies.length-1;j>=0;j--){
+        if(Math.hypot(b.x-enemies[j].x,b.y-enemies[j].y) < b.r + enemies[j].r){
+          enemies[j].hp -= 1;
+          createParticles(b.x,b.y,'#fff',6);
+          bullets.splice(i,1);
+          if(enemies[j].hp <= 0){
+            player.score += 10;
+            createParticles(enemies[j].x,enemies[j].y,enemies[j].color,18);
+            enemies.splice(j,1);
+          }
+          break;
+        }
+      }
+    } else if(b.owner === 'enemy'){
+      if(Math.hypot(b.x-player.x,b.y-player.y) < b.r + player.r){
+        // golpe al jugador
+        player.lives -= 1;
+        createParticles(player.x, player.y, '#ff595e', 16);
+        bullets.splice(i,1);
+        if(player.lives <= 0){ running=false; }
+      }
+    }
+  }
+
+  // Enemies vs player (contacto)
+  for(let i=enemies.length-1;i>=0;i--){
+    if(Math.hypot(enemies[i].x-player.x,enemies[i].y-player.y) < enemies[i].r + player.r){
+      player.lives -= 1;
+      createParticles(player.x, player.y, '#ff595e', 12);
+      enemies.splice(i,1);
+      if(player.lives <= 0){ running=false; }
+    }
+  }
+
+  // Powerups
+  for(let i=powerups.length-1;i>=0;i--){
+    const p = powerups[i];
+    p.life -= dt*1000;
+    if(Math.hypot(player.x-p.x,player.y-p.y) < player.r + p.r){
+      // recoger
+      if(p.kind === 'letter'){ player.score += 5; }
+      else if(p.kind === 'shield'){ player.lives = Math.min(5, player.lives+1); }
+      createParticles(p.x,p.y,'#fff',10);
+      powerups.splice(i,1);
+      continue;
+    }
+    if(p.life <= 0) powerups.splice(i,1);
+  }
+
+  // partículas
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.t += dt*1000;
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 300*dt; // gravedad ligera
+    if(p.t > p.life) particles.splice(i,1);
+  }
+
+  // spawn control
+  if(Math.random() < 0.01) spawnEnemy();
+  if(Math.random() < 0.004) spawnPowerup();
+  // cap enemigos
+  if(enemies.length > 20) enemies.splice(0,enemies.length-20);
+}
+
+let aimAngle = -Math.PI/2;
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left; const my = e.clientY - rect.top;
+  aimAngle = Math.atan2(my - player.y, mx - player.x);
+});
+
+// --- Render ---
+function draw(){
+  // Fondo tipo ``arena'' con patrones (maíz/legumbres sugeridas)
+  ctx.clearRect(0,0,W,H);
+
+  // Dibujar estilo 'suave' de fondo con puntos coloridos
+  for(let i=0;i<80;i++){
+    const px = (i*97)%W; const py = (i*53)%H;
+    ctx.fillStyle = i%3===0? 'rgba(255,230,120,0.07)' : 'rgba(255,255,255,0.02)';
+    ctx.beginPath(); ctx.ellipse(px+20,py+20,12,8,0,0,Math.PI*2); ctx.fill();
+  }
+
+  // Powerups
+  powerups.forEach(p=>{
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fillStyle='#ffd166'; ctx.fill();
+    ctx.fillStyle='#3b2d00'; ctx.font='bold 14px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(p.kind==='letter'? 'A' : 'S', p.x, p.y);
+    ctx.restore();
+  });
+
+  // Enemies
+  enemies.forEach(e=>{
+    ctx.beginPath(); ctx.fillStyle = e.color; ctx.arc(e.x,e.y,e.r,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 12px sans-serif'; ctx.textAlign='center'; ctx.fillText('B', e.x, e.y);
+  });
+
+  // Bullets (letras)
+  bullets.forEach(b=>{
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+    ctx.fillStyle = b.owner==='player'? '#fff' : '#ff7777'; ctx.fill();
+    ctx.fillStyle = '#333'; ctx.font='bold 12px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(b.char || '*', b.x, b.y);
+  });
+
+  // Player
+  ctx.save();
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+  ctx.fillStyle = player.color; ctx.fill();
+  // Ojos estilo simpático
+  ctx.fillStyle='#4b2e00'; ctx.beginPath(); ctx.arc(player.x-5, player.y-3, 2.8,0,Math.PI*2); ctx.arc(player.x+5, player.y-3, 2.8,0,Math.PI*2); ctx.fill();
+  // boca
+  ctx.beginPath(); ctx.moveTo(player.x-6, player.y+5); ctx.quadraticCurveTo(player.x, player.y+10, player.x+6, player.y+5); ctx.lineWidth=2; ctx.strokeStyle='rgba(75,46,0,0.6)'; ctx.stroke();
+  ctx.restore();
+
+  // Partículas
+  particles.forEach(p=>{
+    ctx.globalAlpha = 1 - (p.t / p.life);
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  // HUD
+  ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.fillRect(8,8,160,72);
+  ctx.fillStyle='#2b2b2b'; ctx.font='bold 14px sans-serif'; ctx.fillText('Puntos: '+player.score, 16,28);
+  ctx.fillText('Vidas: '+player.lives, 16,50);
+  ctx.fillText('Enemigos: '+enemies.length, 16,70);
+}
+
+// --- Main loop control ---
+function loop(ts){
+  if(!lastTime) lastTime = ts; const dt = (ts - lastTime)/1000; lastTime = ts;
+  update(dt); draw();
+  if(running) requestAnimationFrame(loop);
+}
+
+// --- Control de inicio / reinicio ---
+function startGame(){
+  // reset
+  bullets=[]; enemies=[]; powerups=[]; particles=[];
+  player.x = W/2; player.y=H/2; player.score=0; player.lives=3; lastTime=0;
+  // spawn inicial
+  for(let i=0;i<3;i++) spawnEnemy();
+  running = true; paused = false;
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('startBtn').addEventListener('click', ()=>{ startGame(); });
+
+// --- Soporte para redimension (mantener canvas ratio) ---
+function resize(){
+  const maxW = Math.min(window.innerWidth-40, 1000);
+  const maxH = Math.min(window.innerHeight-120, 700);
+  const scale = Math.min(maxW/900, maxH/560);
+  canvas.style.width = Math.floor(900*scale)+'px';
+  canvas.style.height = Math.floor(560*scale)+'px';
+}
+window.addEventListener('resize', resize); resize();
+
+// --- Ideas para extender (comentadas) ---
+/*
+  - Multijugador: usar WebSockets y sincronizar posiciones, bullets y eventos.
+  - Mapas con obstáculos (tilemap) que bloqueen disparos y movimiento.
+  - Letras con efectos: combinar varias letras para crear "palabras" que den bonus.
+  - Menú de skins para vegetales, más power-ups y tablas de clasificación.
+*/
+
+</script>
+</body>
+</html>
